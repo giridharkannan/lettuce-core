@@ -17,11 +17,11 @@ package io.lettuce.core.pubsub;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.Matchers.any;
-import static org.mockito.Mockito.times;
-import static org.mockito.Mockito.verify;
-import static org.mockito.Mockito.when;
+import static org.mockito.Mockito.*;
 
 import java.util.Queue;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
 
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -31,6 +31,7 @@ import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 import org.mockito.junit.jupiter.MockitoSettings;
 import org.mockito.quality.Strictness;
+import org.mockito.stubbing.Answer;
 import org.springframework.test.util.ReflectionTestUtils;
 
 import io.lettuce.core.ClientOptions;
@@ -262,6 +263,44 @@ class PubSubCommandHandlerUnitTests {
 
         assertThat(captor.getAllValues().get(0).channel()).isEqualTo("a");
         assertThat(captor.getAllValues().get(1).channel()).isEqualTo("b");
+    }
+
+    @Test
+    void shouldCompleteUnsubscribe() throws Exception {
+        Command<String, String, String> subCmd = new Command<>(CommandType.SUBSCRIBE, new PubSubOutput<>(
+                new Utf8StringCodec()), null);
+        Command<String, String, String> unSubCmd = new Command<>(CommandType.UNSUBSCRIBE, new PubSubOutput<>(
+                new Utf8StringCodec()), null);
+
+        sut.channelRegistered(context);
+        sut.channelActive(context);
+
+        sut.channelRegistered(context);
+        sut.channelActive(context);
+
+        CountDownLatch cl = new CountDownLatch(1);
+
+        doAnswer((Answer<PubSubEndpoint<String, String>>) inv -> {
+            PubSubOutput<String, String, String> out = inv.getArgument(0);
+            if(out.type() == PubSubOutput.Type.message && cl.getCount() > 0) throw new NullPointerException();
+            if(out.type() == PubSubOutput.Type.unsubscribe) cl.countDown();
+            return endpoint;
+        }).when(endpoint).notifyMessage(any());
+
+        stack.add(subCmd);
+        ByteBuf buf = responseBytes(
+                "*3\r\n$9\r\nsubscribe\r\n$10\r\ntest_sub_0\r\n:1\r\n" +
+                   "*3\r\n$7\r\nmessage\r\n$10\r\ntest_sub_0\r\n$3\r\nabc\r\n" +
+                   "*3\r\n$11\r\nunsubscribe\r\n$10\r\ntest_sub_0\r\n:0\r\n");
+        try {
+            sut.channelRead(context, buf);
+        } catch (NullPointerException e) {
+            ;
+        }
+        stack.add(unSubCmd);
+        sut.channelRead(context, responseBytes("*3\r\n$7\r\nmessage\r\n$10\r\ntest_sub_1\r\n$3\r\nabc\r\n"));
+
+        assertThat(cl.await(10, TimeUnit.SECONDS)).isTrue();
     }
 
     @Test
